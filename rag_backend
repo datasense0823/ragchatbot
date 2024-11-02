@@ -3,49 +3,93 @@
 
 import os
 from dotenv import load_dotenv
-import pinecone
 from PyPDF2 import PdfReader
 from langchain.text_splitter import CharacterTextSplitter
-from langchain_community.embeddings import OpenAIEmbeddings
 from pinecone import Pinecone, ServerlessSpec
-
-# Step 1: Load environment variables
+from langchain_openai import OpenAIEmbeddings
+from langchain_openai import ChatOpenAI
+from langchain.prompts import PromptTemplate
 load_dotenv()
 
-# Step 2: Initialize Pinecone and create index
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index_name = "rag-demo"
-if index_name not in pc.list_indexes():
-    pc.create_index(
-        name=index_name,
-        dimension=1536,  # OpenAI embedding dimension
-        metric="cosine",
-        spec=ServerlessSpec(cloud="aws", region="us-east-1")
-    )
-index = pc.Index(index_name)
+#Step 1: Read Text from PDF File
 
-# Step 3: Read text from PDF file
 text = ""
 pdf_reader = PdfReader("incorrect_facts.pdf")
 for page in pdf_reader.pages:
     text += page.extract_text() + "\n"
 
-# Step 4: Split text into chunks
-text_splitter = CharacterTextSplitter(separator="\n", chunk_size=100, chunk_overlap=20, length_function=len)
-chunks = text_splitter.split_text(text)
+# Step 2: Split text into chunks
 
-# Step 5: Initialize embeddings and store chunks in Pinecone
+text_splitter = CharacterTextSplitter(separator="\n", chunk_size=200, chunk_overlap=20, length_function=len)
+chunks = text_splitter.split_text(text)
+for i in range(len(chunks)):
+    print(f"Chunk {i}: {chunks[i]}")
+
+# Step 3: Initialize Pinecone and create index
+
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+index_name = "rag-demo"
+
+pc.create_index(
+        name=index_name,
+        dimension=1536,  # OpenAI embedding dimension
+        metric="cosine",
+        spec=ServerlessSpec(cloud="aws", region="us-east-1")
+    )
+
+index = pc.Index(index_name)
+
+# Step 4: Initialize embeddings and store chunks in Pinecone
 embeddings = OpenAIEmbeddings(openai_api_key=os.getenv("OPENAI_API_KEY"))
 for i, chunk in enumerate(chunks):
     chunk_embedding = embeddings.embed_query(chunk)
     index.upsert([(str(i), chunk_embedding, {"text": chunk})])
 
-# Step 6: Query and retrieve answer based on cosine similarity
+
+
+# Step 5- Create llm object for chain
+
+llm = ChatOpenAI(model="gpt-4", temperature=0)
+
+#Step 6- User Asks Question
 while True:
     query = input("Ask a question (or type 'exit' to quit): ")
-    if query.lower() == 'exit':
+    if query.lower() == "exit":
         break
+
+    # Step 7- Retrieve top 3 relevant chunks from Pinecone
     query_embedding = embeddings.embed_query(query)
-    result = index.query(vector=query_embedding, top_k=1, include_metadata=True)
-    most_similar_chunk = result.matches[0].metadata["text"]
-    print("\nAnswer:", most_similar_chunk)
+    result = index.query(vector=query_embedding, top_k=3, include_metadata=True)
+
+    # Step 8- Combine top results into a single context string
+    augmented_context = "\n\n".join([match.metadata["text"] for match in result.matches])
+
+
+    # Step 9- Create Prompt Template
+
+    prompt = PromptTemplate(
+        input_variables=["context", "question"],
+        template="You are a helpful assistant. Use the context provided to answer the question accurately. Only use this context, not your knowledge.\n\n"
+                "Context:{context}"
+                "Question:{question}"
+                
+    )
+
+    # Step 10- Set up LangChain's LLMChain with GPT-4 and prompt template
+    chain = prompt | llm 
+
+    # Step 11- Generate GPT-4 response using augmented context and user question
+    response = chain.invoke({"context": augmented_context, "question": query})
+    print(f"Retrieved Text: {augmented_context}")
+    print("Answer:", response.content)
+
+
+
+
+
+
+
+
+
+
+
