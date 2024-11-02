@@ -1,0 +1,97 @@
+# Required installations (uncomment and run if needed)
+# !pip install streamlit langchain openai pinecone-client PyPDF2 python-dotenv
+
+import os
+from dotenv import load_dotenv
+import pinecone
+import streamlit as st
+from PyPDF2 import PdfReader
+from langchain.text_splitter import CharacterTextSplitter
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain.prompts import PromptTemplate
+from datetime import datetime
+from pinecone import Pinecone, ServerlessSpec
+
+# Step 1: Load environment variables
+load_dotenv()
+pinecone_api_key = os.getenv("PINECONE_API_KEY")
+openai_api_key = os.getenv("OPENAI_API_KEY")
+
+# Generate a unique index name using the current timestamp
+index_name = f"rag-demo-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+# Step 2: Initialize Pinecone client
+pc = Pinecone(api_key=pinecone_api_key)
+
+# Create a new unique Pinecone index
+pc.create_index(
+    name=index_name,
+    dimension=1536,  # OpenAI embedding dimension
+    metric="cosine",
+    spec=ServerlessSpec(cloud="aws", region="us-east-1")
+)
+
+# Connect to the newly created index
+index = pc.Index(index_name)
+
+# Initialize OpenAI for GPT-4
+llm = ChatOpenAI(model="gpt-4", openai_api_key=openai_api_key, temperature=0)
+
+# Streamlit application layout
+st.set_page_config(page_title="Datasense - PDF Q&A", page_icon="📄", layout="centered")
+st.title("Datasense PDF Q&A")
+st.write("Upload a PDF, and then ask questions based on its content.")
+
+# PDF Upload Section
+uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
+
+# Proceed if PDF is uploaded
+if uploaded_file:
+    # Step 3: Read text from the uploaded PDF
+    text = ""
+    pdf_reader = PdfReader(uploaded_file)
+    for page in pdf_reader.pages:
+        text += page.extract_text() + "\n"
+    
+    # Step 4: Split text into chunks for embedding
+    text_splitter = CharacterTextSplitter(separator="\n", chunk_size=150, chunk_overlap=20, length_function=len)
+    chunks = text_splitter.split_text(text)
+
+    # Step 5: Embed chunks and store in Pinecone
+    embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
+    for i, chunk in enumerate(chunks):
+        chunk_embedding = embeddings.embed_query(chunk)
+        index.upsert([(str(i), chunk_embedding, {"text": chunk})])
+
+    st.success("PDF content embedded successfully! You can now ask questions.")
+
+# Question-Answer Section
+query = st.text_input("Ask a question based on the PDF content:")
+if query and uploaded_file:
+    # Step 6: Retrieve top 3 relevant chunks from Pinecone
+    query_embedding = embeddings.embed_query(query)
+    result = index.query(vector=query_embedding, top_k=3, include_metadata=True)
+
+    # Combine top results into a single context string
+    augmented_context = "\n\n".join([match.metadata["text"] for match in result.matches])
+    
+    # Display Retrieved Context
+    st.subheader("Retrieved Context")
+    st.write(augmented_context)
+
+    # Define prompt template for GPT-4
+    prompt = PromptTemplate(
+        input_variables=["context", "question"],
+        template="You are a helpful assistant. Use the context provided to answer the question accurately. Only use this context, not your knowledge.\n\n"
+                 "Context:\n{context}\n\n"
+                 "Question:\n{question}\n\n"
+                 "Answer:"
+    )
+
+    # Set up LangChain's LLMChain with GPT-4 and prompt template
+    chain = prompt | llm 
+
+    # Generate GPT-4 response using augmented context and user question
+    response = chain.invoke({"context": augmented_context, "question": query})
+    st.subheader("Answer")
+    st.write(response.content)
