@@ -21,7 +21,7 @@ Replace <your_groq_api_key> with your key, which you can get from GROQ API Docum
 1. Build the Docker image and name it datasense-career-guide.
 2. Run the Docker container to ensure the application launches correctly.
    
-# Deliverables:** Submit screenshots of:
+# Deliverables: Submit screenshots of:
 
 1. The Docker image being built successfully.
 2. The Docker container running successfully.
